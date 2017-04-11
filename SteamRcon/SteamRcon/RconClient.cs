@@ -12,6 +12,12 @@ namespace SteamRcon
     public class RconClient
     {
         private TcpClient tcpClient = new TcpClient();
+        private Action<string> dataReceived;
+        private static int readBufferSize = 1000;
+        private byte[] readBuffer = new byte[readBufferSize];
+
+        private List<byte> receivedBytes = new List<byte>();
+
         public List<String> Log = new List<String>();
         public bool Connected
         {
@@ -24,21 +30,23 @@ namespace SteamRcon
             get;
             private set;
         }
-        public RconClient()
+        public RconClient(Action<string> receiveDataCallback)
         {
+            dataReceived = receiveDataCallback;
         }
 
-        public void Connect(String address, int port)
+        public void Connect(IPAddress address, int port)
         {
-            IPAddress IPAddr;
-            if (IPAddress.TryParse(address, out IPAddr))
+            if (port < 1 || port > 65535)
+                throw new InvalidOperationException("Must be a valid port.");
+            try
             {
-                try
-                {
-                    tcpClient.Connect(IPAddr, port);
-                }
-                catch (Exception e) { WriteToLog(e.Message); }
+                tcpClient.Connect(address, port);
+
+                StateObject so = new StateObject();
+                tcpClient.GetStream().BeginRead(so.ReadBuffer, 0, so.ReadBuffer.Length, OnSocketRead, so);
             }
+            catch (Exception e) { throw e; }
         }
 
         public void Disconnect()
@@ -46,56 +54,68 @@ namespace SteamRcon
             Connected = false;
         }
 
-        public void Authorize(String rconPasswd)
+        private void OnSocketRead(IAsyncResult ar)
         {
-            if (tcpClient.Connected)
+            var readStream = tcpClient.GetStream();
+            StateObject so = (StateObject)ar.AsyncState;
+
+            var bytesRead = readStream.EndRead(ar);
+            so.BytesRead.Write(so.ReadBuffer, 0, bytesRead);
+
+            if (so.BytesRead.Length > 4)
             {
-                try
+                byte[] len = new byte[4];
+                so.BytesRead.Read(len, 0, 4);
+                var packetSize = BitConverter.ToInt32(len, 0);
+                if (so.BytesRead.Length - 4 >= packetSize)
                 {
-                    MemoryStream packetStream = new MemoryStream();
-                    int id = 0; //UniqueID
-                    byte[] asciiCommand = Encoding.ASCII.GetBytes(rconPasswd + "\0");
-
-                    int packetSize = asciiCommand.Length + 9;
-
-                    // packetStream.Write()
-                    packetStream.Write(BitConverter.GetBytes(packetSize), 0, 4);
-                    packetStream.Write(BitConverter.GetBytes(id), 4, 4);
-                    packetStream.Write(BitConverter.GetBytes((int)PacketType.SERVERDATA_AUTH), 8, 4);
-                    packetStream.Write(asciiCommand, 12, asciiCommand.Length);
-
-                    tcpClient.GetStream().Write(packetStream.ToArray(), 0, (int)packetStream.Length);
+                    byte[] packet = new byte[packetSize + 4];
+                    so.BytesRead.Read(packet, 0, packetSize + 4);
+                    ParseReceivedData(packet);
                 }
-                catch (Exception e) { WriteToLog(e.Message); }
             }
+
+            readStream.BeginRead(readBuffer, 0, 1000, OnSocketRead, null);
         }
 
-        public bool SendCommand(String command)
+        private void ParseReceivedData(byte[] data)
         {
-            if (tcpClient.Connected)
+
+        }
+
+        private void SendPacket(PacketType t, string body)
+        {
+
+            if (!Connected)
+                throw new InvalidOperationException("Not Connected.");
+
+            var netStream = tcpClient.GetStream();
+
+            try
             {
-                try
-                {
-                    MemoryStream packetStream = new MemoryStream();
-                    int id = 0; //UniqueID
-                    byte[] asciiCommand = Encoding.ASCII.GetBytes(command + "\0");
+                List<byte> byteStream = new List<byte>();
 
-                    int packetSize = asciiCommand.Length + 9;
+                int id = 0;
+                byte[] asciiBody = Encoding.ASCII.GetBytes(body + @"\0");
+                int packetSize = asciiBody.Length + 9;
 
-                    // packetStream.Write()
-                    packetStream.Write(BitConverter.GetBytes(packetSize), 0, 4);
-                    packetStream.Write(BitConverter.GetBytes(id), 4, 4);
-                    packetStream.Write(BitConverter.GetBytes((int)PacketType.SERVERDATA_EXECCOMMAND), 8, 4);
-                    packetStream.Write(asciiCommand, 12, asciiCommand.Length);
+                byteStream.AddRange(BitConverter.GetBytes(packetSize));
+                byteStream.AddRange(BitConverter.GetBytes(id));
+                byteStream.AddRange(BitConverter.GetBytes((int)t));
+                byteStream.AddRange(asciiBody);
 
-                    tcpClient.GetStream().Write(packetStream.ToArray(), 0, (int)packetStream.Length);
-
-                    return true;
-                }
-                catch (Exception e) { WriteToLog(e.Message); }
+                netStream.Write(byteStream.ToArray(), 0, byteStream.Count);
             }
+            catch (Exception e) { throw e; }
+        }
 
-            return false;
+        public void Authorize(string rconPassword)
+        {
+            SendPacket(PacketType.SERVERDATA_AUTH, rconPassword);
+        }
+        public void SendCommand(string command)
+        {
+            SendPacket(PacketType.SERVERDATA_EXECCOMMAND, command);
         }
         private void WriteToLog(String message)
         {
@@ -106,5 +126,12 @@ namespace SteamRcon
         {
             SERVERDATA_AUTH = 3, SERVERDATA_AUTH_RESPONSE = 2, SERVERDATA_EXECCOMMAND = 2, SERVERDATA_RESPONSE_VALUE = 0
         };
+
+        private class StateObject
+        {
+            public static int ReadBufferSize = 1000;
+            public byte[] ReadBuffer = new byte[readBufferSize];
+            public MemoryStream BytesRead = new MemoryStream();
+        }
     }
 }
